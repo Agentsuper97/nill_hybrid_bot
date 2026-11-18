@@ -1,0 +1,249 @@
+"""Read-only Alpaca paper-account snapshot. Never submits or modifies orders."""
+
+import math
+import os
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from dotenv import load_dotenv
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import GetOrdersRequest, GetPortfolioHistoryRequest
+from alpaca.trading.enums import QueryOrderStatus
+
+from daily_loss_checks import evaluate_daily_loss
+
+NY = ZoneInfo("America/New_York")
+OPEN_ORDER_LIMIT = 500
+
+
+def enum_value(value):
+    return getattr(value, "value", value)
+
+
+def get_account_snapshot(client, now=None):
+    """Collect account, daily P&L, positions and open orders.
+
+    Returns UNKNOWN — BLOCKED if required information cannot be verified.
+    This function never submits, cancels or modifies orders.
+    """
+    snapshot = {
+        "status": "UNKNOWN — BLOCKED",
+        "reason": "Snapshot has not been fully verified.",
+        "account_equity": None,
+        "account_status": None,
+        "trading_blocked": None,
+        "daily_pnl": None,
+        "daily_pnl_status": "UNKNOWN — BLOCKED",
+        "positions": [],
+        "positions_verified": False,
+        "open_orders": [],
+        "open_orders_verified": False,
+    }
+
+    try:
+        account = client.get_account()
+
+        equity = float(account.equity)
+        if not math.isfinite(equity) or equity <= 0:
+            raise ValueError("Account equity is not a valid positive number.")
+
+        account_status = str(enum_value(account.status)).upper()
+        trading_blocked = account.trading_blocked
+
+        if not isinstance(trading_blocked, bool):
+            raise ValueError("Broker trading-blocked status is invalid.")
+
+        snapshot["account_equity"] = equity
+        snapshot["account_status"] = account_status
+        snapshot["trading_blocked"] = trading_blocked
+
+        if account_status != "ACTIVE" or trading_blocked:
+            snapshot["status"] = "BLOCKED"
+            snapshot["reason"] = "Alpaca account is not active or is trading-blocked."
+            return snapshot
+
+        history_request = GetPortfolioHistoryRequest(
+            period="1D",
+            timeframe="15Min",
+            intraday_reporting="market_hours",
+            pnl_reset="per_day",
+        )
+        history = client.get_portfolio_history(history_request)
+
+        timestamps = (
+            list(history.timestamp)
+            if history.timestamp is not None
+            else []
+        )
+        pnl_values = (
+            list(history.profit_loss)
+            if history.profit_loss is not None
+            else []
+        )
+
+        pnl_status, pnl_reason, daily_pnl, age_minutes = evaluate_daily_loss(
+            timestamps,
+            pnl_values,
+            now if now is not None else datetime.now(NY),
+        )
+
+        snapshot["daily_pnl_status"] = pnl_status
+        snapshot["daily_pnl_reason"] = pnl_reason
+        snapshot["history_age_minutes"] = age_minutes
+        snapshot["daily_pnl"] = daily_pnl
+
+        positions = client.get_all_positions()
+        if not isinstance(positions, list):
+            raise ValueError("Alpaca returned an invalid positions response.")
+
+        position_records = []
+        for position in positions:
+            symbol = position.symbol
+            quantity = float(position.qty)
+            side = str(enum_value(position.side)).lower()
+
+            if (
+                not isinstance(symbol, str)
+                or not symbol.strip()
+                or not math.isfinite(quantity)
+                or quantity <= 0
+                or side not in ("long", "short")
+            ):
+                raise ValueError("Alpaca returned an invalid position record.")
+
+            position_records.append({
+                "symbol": symbol.strip().upper(),
+                "quantity": quantity,
+                "side": side,
+            })
+
+        snapshot["positions"] = position_records
+        snapshot["positions_verified"] = True
+
+        order_request = GetOrdersRequest(
+            status=QueryOrderStatus.OPEN,
+            limit=OPEN_ORDER_LIMIT,
+        )
+        orders = client.get_orders(order_request)
+
+        if not isinstance(orders, list):
+            raise ValueError("Alpaca returned an invalid open-orders response.")
+
+        if len(orders) >= OPEN_ORDER_LIMIT:
+            raise ValueError(
+                "Open-order response reached the 500-order limit; "
+                "the complete order list cannot be verified."
+            )
+
+        order_records = []
+        for order in orders:
+            symbol = order.symbol
+            side = str(enum_value(order.side)).lower()
+            order_type = str(enum_value(order.type)).lower()
+            status = str(enum_value(order.status)).lower()
+
+            if (
+                not isinstance(symbol, str)
+                or not symbol.strip()
+                or side not in ("buy", "sell")
+                or not order_type
+                or not status
+            ):
+                raise ValueError("Alpaca returned an invalid open-order record.")
+
+            order_records.append({
+                "symbol": symbol.strip().upper(),
+                "side": side,
+                "type": order_type,
+                "status": status,
+            })
+
+        snapshot["open_orders"] = order_records
+        snapshot["open_orders_verified"] = True
+        if pnl_status != "ALLOWED":
+            snapshot["status"] = (
+                "BLOCKED" if pnl_status == "BLOCKED" else "UNKNOWN — BLOCKED"
+            )
+            snapshot["reason"] = pnl_reason
+        else:
+            snapshot["status"] = "SNAPSHOT VERIFIED — INFORMATIONAL"
+            snapshot["reason"] = (
+                "Account, daily P&L, positions and open orders were retrieved "
+                "and passed basic validation. This is not trade permission."
+            )
+        snapshot["history_age_minutes"] = age_minutes
+        return snapshot
+
+    except Exception as exc:
+        snapshot["status"] = "UNKNOWN — BLOCKED"
+        snapshot["reason"] = f"{type(exc).__name__}: {exc}"
+        return snapshot
+
+
+def main():
+    print("ALPACA PAPER ACCOUNT — READ-ONLY SNAPSHOT")
+    print("No orders will be submitted, cancelled or modified.")
+    print()
+
+    load_dotenv(Path(__file__).resolve().parent / ".env")
+    key = os.getenv("APCA_API_KEY_ID")
+    secret = os.getenv("APCA_API_SECRET_KEY")
+
+    if not key or not secret:
+        print("Snapshot status: UNKNOWN — BLOCKED")
+        print("Reason: Alpaca credentials are missing.")
+        return
+
+    try:
+        client = TradingClient(key, secret, paper=True)
+        snapshot = get_account_snapshot(client)
+
+        print(f"Snapshot status: {snapshot['status']}")
+        print(f"Reason: {snapshot['reason']}")
+
+        if snapshot["account_status"] is not None:
+            print(f"Account status: {snapshot['account_status']}")
+            print(f"Broker trading blocked: {snapshot['trading_blocked']}")
+            print(f"Account equity: ${snapshot['account_equity']:,.2f}")
+
+        if snapshot["daily_pnl"] is not None:
+            print(f"Daily P&L: ${snapshot['daily_pnl']:,.2f}")
+            print(
+                "History age: "
+                f"{snapshot['history_age_minutes']:.1f} minutes"
+            )
+        else:
+            print("Daily P&L: UNKNOWN")
+
+        if snapshot["positions_verified"]:
+            print(f"Open positions: {len(snapshot['positions'])}")
+        else:
+            print("Open positions: UNKNOWN — not verified")
+        for position in snapshot["positions"]:
+            print(
+                f"  {position['symbol']}: {position['side']} "
+                f"{position['quantity']:g} shares"
+            )
+
+        if snapshot["open_orders_verified"]:
+            print(f"Open orders: {len(snapshot['open_orders'])}")
+        else:
+            print("Open orders: UNKNOWN — not verified")
+        for order in snapshot["open_orders"]:
+            print(
+                f"  {order['symbol']}: {order['side']} "
+                f"{order['type']} ({order['status']})"
+            )
+
+    except Exception as exc:
+        print("Snapshot status: UNKNOWN — BLOCKED")
+        print(f"Reason: {type(exc).__name__}: {exc}")
+
+    print()
+    print("Important: this is a read-only snapshot, not an entry lock.")
+    print("It does not authorize or submit trades.")
+
+
+if __name__ == "__main__":
+    main()

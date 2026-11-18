@@ -1,0 +1,72 @@
+"""Pre-trade safety checks for paper trading only. Never submits orders."""
+
+from dataclasses import dataclass
+from typing import FrozenSet
+
+import paper_safety_config as config
+
+
+@dataclass(frozen=True)
+class TradeProposal:
+    symbol: str
+    entry_price: float
+    stop_price: float
+    open_positions: int
+    pending_entry_symbols: FrozenSet[str]
+    daily_pnl: float
+    paper_mode: bool
+
+
+@dataclass(frozen=True)
+class SafetyDecision:
+    approved: bool
+    reason: str
+    planned_risk: float = 0.0
+    quantity: int = 0
+
+
+def check_trade(proposal: TradeProposal) -> SafetyDecision:
+    """Validate a proposed long entry. This function does not place orders."""
+
+    symbol = proposal.symbol.strip().upper()
+
+    if not config.PAPER_ONLY or not proposal.paper_mode:
+        return SafetyDecision(False, "Paper-only verification failed.")
+
+    if not symbol:
+        return SafetyDecision(False, "Missing symbol.")
+
+    if proposal.open_positions < 0:
+        return SafetyDecision(False, "Invalid open-position count.")
+
+    if proposal.open_positions >= config.MAX_OPEN_POSITIONS:
+        return SafetyDecision(False, "Maximum open positions reached.")
+
+    pending = {s.strip().upper() for s in proposal.pending_entry_symbols}
+    if config.BLOCK_DUPLICATE_ENTRIES and symbol in pending:
+        return SafetyDecision(False, "Entry already pending for this symbol.")
+
+    if proposal.daily_pnl <= -(config.STARTING_EQUITY * config.MAX_DAILY_LOSS):
+        return SafetyDecision(False, "Daily loss limit reached; entries stopped.")
+
+    if proposal.entry_price <= 0 or proposal.stop_price <= 0:
+        return SafetyDecision(False, "Entry and stop prices must be positive.")
+
+    if proposal.stop_price >= proposal.entry_price:
+        return SafetyDecision(False, "Long-trade stop must be below entry.")
+
+    risk_per_share = proposal.entry_price - proposal.stop_price
+    risk_budget = config.STARTING_EQUITY * config.RISK_PER_TRADE
+    quantity = int(risk_budget // risk_per_share)
+
+    if quantity < 1:
+        return SafetyDecision(
+            False, "One share exceeds the planned risk budget.",
+            planned_risk=0.0, quantity=0
+        )
+
+    planned_risk = quantity * risk_per_share
+    return SafetyDecision(
+        True, "Preliminary checks passed; no order submitted.",
+        planned_risk=round(planned_risk, 2), quantity=quantity
+    )

@@ -1,0 +1,94 @@
+"""Read-only Alpaca paper-account daily-loss report. Never submits or modifies orders."""
+
+import math
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from dotenv import load_dotenv
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import GetPortfolioHistoryRequest
+
+from daily_loss_checks import evaluate_daily_loss
+
+
+DAILY_LOSS_LIMIT_DOLLARS = 200.00
+NY = ZoneInfo("America/New_York")
+
+
+def main():
+    print("ALPACA PAPER ACCOUNT — DAILY LOSS REPORT")
+    print("Read-only: no orders will be submitted, cancelled, or modified.")
+    print(f"Account-wide daily loss limit: ${DAILY_LOSS_LIMIT_DOLLARS:,.2f}")
+    print()
+
+    load_dotenv(Path(__file__).resolve().parent / ".env")
+    key = os.getenv("APCA_API_KEY_ID")
+    secret = os.getenv("APCA_API_SECRET_KEY")
+
+    if not key or not secret:
+        print("Account equity: unavailable")
+        print("Daily P&L: UNKNOWN")
+        print("New-entry status: UNKNOWN — BLOCKED")
+        print("Reason: Alpaca credentials are missing.")
+        return
+
+    try:
+        client = TradingClient(key, secret, paper=True)
+        account = client.get_account()
+
+        equity = float(account.equity)
+        if not math.isfinite(equity) or equity <= 0:
+            raise ValueError("Account equity is not a valid positive number.")
+
+        print("Paper mode requested: True")
+        print(f"Account status: {account.status}")
+        print(f"Trading blocked by Alpaca: {account.trading_blocked}")
+        print(f"Account equity: ${equity:,.2f}")
+
+        status_value = getattr(account.status, "value", account.status)
+        if str(status_value).upper() != "ACTIVE" or account.trading_blocked:
+            print("Daily P&L: not evaluated")
+            print("New-entry status: BLOCKED")
+            print("Reason: Alpaca account is not active or is trading-blocked.")
+            return
+
+        history_request = GetPortfolioHistoryRequest(
+            period="1D",
+            timeframe="15Min",
+            intraday_reporting="market_hours",
+            pnl_reset="per_day",
+        )
+        history = client.get_portfolio_history(history_request)
+
+        status, reason, daily_pnl, age_minutes = evaluate_daily_loss(
+            history.timestamp or [],
+            history.profit_loss or [],
+            datetime.now(NY),
+        )
+
+        if status == "UNKNOWN — BLOCKED":
+            raise ValueError(reason)
+
+        print(f"History age: {age_minutes:.1f} minutes")
+        print(f"Daily P&L: ${daily_pnl:,.2f}")
+        if status == "ALLOWED":
+            print("New-entry status: ALLOWED (informational only)")
+        else:
+            print("New-entry status: BLOCKED")
+        print(f"Reason: {reason}")
+
+    except Exception as exc:
+        print("Daily P&L: UNKNOWN")
+        print("New-entry status: UNKNOWN — BLOCKED")
+        print(f"Reason: {type(exc).__name__}: {exc}")
+
+    print()
+    print("Important: this report does not enforce a trading lock.")
+    print("It is informational until a separate paper-trading controller")
+    print("is deliberately designed, tested, and connected to this check.")
+
+
+if __name__ == "__main__":
+    main()

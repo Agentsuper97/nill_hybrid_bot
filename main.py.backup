@@ -1,0 +1,100 @@
+import yfinance as yf
+import pandas as pd
+
+SYMBOL = "NVDA"
+
+LOOKBACK = 10
+EMA_PERIOD = 20
+RVOL_PERIOD = 20
+MIN_RVOL = 1.5
+
+print(f"Downloading {SYMBOL} 15-minute data...")
+
+data = yf.download(
+    SYMBOL,
+    period="10d",
+    interval="15m",
+    progress=False,
+    auto_adjust=True
+)
+
+if data.empty:
+    print("No data received.")
+    raise SystemExit(1)
+
+if isinstance(data.columns, pd.MultiIndex):
+    data.columns = data.columns.get_level_values(0)
+
+data = data.sort_index()
+
+index = pd.DatetimeIndex(data.index)
+if index.tz is None:
+    print("Missing timezone; cannot safely continue.")
+    raise SystemExit(1)
+
+data.index = index.tz_convert("America/New_York")
+
+# Exclude the currently forming 15-minute candle.
+now = pd.Timestamp.now(tz="America/New_York")
+bar_end = data.index + pd.Timedelta(minutes=15)
+data = data.loc[bar_end <= now].copy()
+
+minimum_bars = max(LOOKBACK + 2, EMA_PERIOD + 2, RVOL_PERIOD + 2)
+
+if len(data) < minimum_bars:
+    print("Not enough completed candles.")
+    raise SystemExit(1)
+
+close = data["Close"]
+high = data["High"]
+volume = data["Volume"]
+
+# Latest completed candle.
+entry = float(close.iloc[-1])
+previous_close = float(close.iloc[-2])
+
+# Reference levels exclude the signal candle.
+previous_high = float(
+    high.iloc[-LOOKBACK-1:-1].max()
+)
+
+ema20 = close.ewm(span=EMA_PERIOD, adjust=False).mean()
+latest_ema20 = float(ema20.iloc[-1])
+
+# Compare latest volume with the preceding 20 candles.
+average_volume = float(
+    volume.iloc[-RVOL_PERIOD-1:-1].mean()
+)
+
+current_volume = float(volume.iloc[-1])
+
+if average_volume <= 0:
+    print("Invalid volume baseline.")
+    raise SystemExit(1)
+
+rvol = current_volume / average_volume
+
+breakout = (
+    previous_close <= previous_high
+    and entry > previous_high
+)
+
+momentum = entry > latest_ema20
+volume_confirmed = rvol >= MIN_RVOL
+
+print("\n--- 15-minute breakout audit ---")
+print("Candle time:", data.index[-1])
+print(f"Close: ${entry:.2f}")
+print(f"Previous 10-bar high: ${previous_high:.2f}")
+print(f"EMA20: ${latest_ema20:.2f}")
+print(f"RVOL: {rvol:.2f}x")
+
+print("\nBreakout confirmed:", breakout)
+print("Above EMA20:", momentum)
+print("Volume confirmed:", volume_confirmed)
+
+if breakout and momentum and volume_confirmed:
+    print("\n15-MINUTE SETUP: PASSED")
+else:
+    print("\n15-MINUTE SETUP: REJECTED")
+

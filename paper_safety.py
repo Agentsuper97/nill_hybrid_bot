@@ -1,0 +1,160 @@
+"""Offline pre-trade safety checks. Never submits orders."""
+
+from dataclasses import dataclass
+from math import isfinite
+from typing import FrozenSet
+
+import paper_safety_config as config
+
+
+@dataclass(frozen=True)
+class TradeProposal:
+    symbol: str
+    entry_price: float
+    stop_price: float
+    open_positions: int
+    pending_entry_symbols: FrozenSet[str]
+    daily_pnl: float
+    paper_mode: bool
+    current_equity: float = config.STARTING_EQUITY
+    can_exit_before_close: bool = True
+
+
+@dataclass(frozen=True)
+class SafetyDecision:
+    approved: bool
+    reason: str
+    planned_risk: float = 0.0
+    quantity: int = 0
+
+
+def check_trade(proposal: TradeProposal) -> SafetyDecision:
+    """Validate a proposed long entry; never places an order."""
+
+    if (
+        not isinstance(config.PAPER_ONLY, bool)
+        or config.PAPER_ONLY is not True
+        or proposal.paper_mode is not True
+    ):
+        return SafetyDecision(False, "Paper-only verification failed.")
+
+    if (
+        not isinstance(config.ALLOW_OVERNIGHT_POSITIONS, bool)
+        or not isinstance(config.BLOCK_DUPLICATE_ENTRIES, bool)
+    ):
+        return SafetyDecision(False, "Invalid Boolean safety configuration.")
+
+    if not isinstance(proposal.symbol, str):
+        return SafetyDecision(False, "Invalid symbol.")
+    symbol = proposal.symbol.strip().upper()
+    if not symbol:
+        return SafetyDecision(False, "Missing symbol.")
+
+    if not isinstance(proposal.open_positions, int) or isinstance(
+        proposal.open_positions, bool
+    ):
+        return SafetyDecision(False, "Invalid open-position count.")
+    if proposal.open_positions < 0:
+        return SafetyDecision(False, "Invalid open-position count.")
+
+    if (
+        not isinstance(config.MAX_OPEN_POSITIONS, int)
+        or isinstance(config.MAX_OPEN_POSITIONS, bool)
+        or config.MAX_OPEN_POSITIONS < 1
+    ):
+        return SafetyDecision(False, "Invalid maximum-position configuration.")
+
+    if proposal.open_positions >= config.MAX_OPEN_POSITIONS:
+        return SafetyDecision(False, "Maximum open positions reached.")
+
+    if not config.ALLOW_OVERNIGHT_POSITIONS and (
+        proposal.can_exit_before_close is not True
+    ):
+        return SafetyDecision(
+            False, "Entry blocked: cannot confirm exit before market close."
+        )
+
+    if not isinstance(proposal.pending_entry_symbols, (set, frozenset, list, tuple)):
+        return SafetyDecision(False, "Invalid pending-entry data.")
+
+    if any(
+        not isinstance(item, str) or not item.strip()
+        for item in proposal.pending_entry_symbols
+    ):
+        return SafetyDecision(False, "Invalid pending-entry data.")
+
+    pending = {
+        item.strip().upper()
+        for item in proposal.pending_entry_symbols
+    }
+
+    if config.BLOCK_DUPLICATE_ENTRIES and symbol in pending:
+        return SafetyDecision(False, "Entry already pending for this symbol.")
+
+    if (
+        not isinstance(config.RISK_PER_TRADE, (int, float))
+        or isinstance(config.RISK_PER_TRADE, bool)
+        or not isfinite(config.RISK_PER_TRADE)
+        or not 0 < config.RISK_PER_TRADE <= 0.01
+    ):
+        return SafetyDecision(False, "Invalid risk configuration.")
+
+    if (
+        not isinstance(config.MAX_DAILY_LOSS, (int, float))
+        or isinstance(config.MAX_DAILY_LOSS, bool)
+        or not isfinite(config.MAX_DAILY_LOSS)
+        or not 0 < config.MAX_DAILY_LOSS <= 0.05
+    ):
+        return SafetyDecision(False, "Invalid daily-loss configuration.")
+
+    numbers = (
+        proposal.entry_price,
+        proposal.stop_price,
+        proposal.daily_pnl,
+        proposal.current_equity,
+        config.STARTING_EQUITY,
+        config.RISK_PER_TRADE,
+        config.MAX_DAILY_LOSS,
+    )
+    if any(
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not isfinite(value)
+        for value in numbers
+    ):
+        return SafetyDecision(False, "Invalid or non-finite numeric input.")
+
+    if proposal.current_equity <= 0:
+        return SafetyDecision(False, "Current equity must be positive.")
+    if config.STARTING_EQUITY <= 0:
+        return SafetyDecision(False, "Configured starting equity must be positive.")
+    if not 0 < config.RISK_PER_TRADE <= 0.01:
+        return SafetyDecision(False, "Risk setting must be above 0% and at most 1%.")
+    if not 0 < config.MAX_DAILY_LOSS <= 0.05:
+        return SafetyDecision(False, "Daily-loss setting must be above 0% and at most 5%.")
+
+    daily_loss_limit = config.STARTING_EQUITY * config.MAX_DAILY_LOSS
+    if proposal.daily_pnl <= -daily_loss_limit:
+        return SafetyDecision(False, "Daily loss limit reached; entries stopped.")
+
+    if proposal.entry_price <= 0 or proposal.stop_price <= 0:
+        return SafetyDecision(False, "Entry and stop prices must be positive.")
+    if proposal.stop_price >= proposal.entry_price:
+        return SafetyDecision(False, "Long-trade stop must be below entry.")
+
+    risk_per_share = proposal.entry_price - proposal.stop_price
+    risk_budget = proposal.current_equity * config.RISK_PER_TRADE
+    quantity = int(risk_budget / risk_per_share)
+
+    if quantity < 1:
+        return SafetyDecision(
+            False, "One share exceeds the planned risk budget."
+        )
+
+    planned_risk = quantity * risk_per_share
+    return SafetyDecision(
+        True,
+        "Preliminary checks passed; no order submitted.",
+        planned_risk=round(planned_risk, 2),
+        quantity=quantity,
+    )

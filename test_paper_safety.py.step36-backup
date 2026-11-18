@@ -1,0 +1,87 @@
+"""Offline tests for paper_safety.py. No broker connection or orders."""
+
+from paper_safety import TradeProposal, check_trade
+
+
+def proposal(**overrides):
+    values = {
+        "symbol": "AAPL",
+        "entry_price": 100.00,
+        "stop_price": 99.00,
+        "open_positions": 0,
+        "pending_entry_symbols": frozenset(),
+        "daily_pnl": 0.00,
+        "paper_mode": True,
+    }
+    values.update(overrides)
+    return TradeProposal(**values)
+
+
+def expect_blocked(label, **overrides):
+    decision = check_trade(proposal(**overrides))
+    assert not decision.approved, (
+        f"FAIL: {label} was incorrectly approved: {decision}"
+    )
+    print(f"PASS: blocked — {label}")
+
+
+def main():
+    # A $1 stop distance and $50 risk budget should allow 50 shares.
+    decision = check_trade(proposal())
+    assert decision.approved, f"Expected safe proposal to pass: {decision}"
+    assert decision.quantity == 50, (
+        f"Expected 50 shares, got {decision.quantity}"
+    )
+    assert decision.planned_risk == 50.00
+    print("PASS: valid proposal; quantity and planned risk are correct")
+
+    expect_blocked("paper mode is false", paper_mode=False)
+    expect_blocked("empty symbol", symbol="   ")
+    expect_blocked("maximum open positions", open_positions=5)
+    expect_blocked(
+        "duplicate pending entry",
+        pending_entry_symbols=frozenset({"aapl"}),
+    )
+    expect_blocked("daily loss limit reached", daily_pnl=-200.00)
+    expect_blocked("non-positive entry", entry_price=0)
+    expect_blocked("stop at entry", stop_price=100.00)
+    expect_blocked("stop above entry", stop_price=101.00)
+    expect_blocked(
+        "one share exceeds risk budget",
+        entry_price=1000.00,
+        stop_price=900.00,
+    )
+
+    print("\nAll offline safety tests passed.")
+
+
+if __name__ == "__main__":
+    main()
+
+    # Additional tests for the revised safeguards.
+    expect_blocked(
+        "cannot confirm exit before close",
+        can_exit_before_close=False,
+    )
+    expect_blocked(
+        "NaN entry price",
+        entry_price=float("nan"),
+    )
+    expect_blocked(
+        "infinite stop price",
+        stop_price=float("inf"),
+    )
+
+    # With $20,000 equity, 0.5% risk is $100.
+    larger_account = check_trade(proposal(current_equity=20_000.00))
+    assert larger_account.approved, larger_account
+    assert larger_account.quantity == 100, (
+        f"Expected 100 shares, got {larger_account.quantity}"
+    )
+    assert larger_account.planned_risk == 100.00
+    print("PASS: position sizing uses supplied current equity")
+
+    # Negative equity must never be accepted.
+    expect_blocked("non-positive current equity", current_equity=0)
+
+    print("All additional safety tests passed.")

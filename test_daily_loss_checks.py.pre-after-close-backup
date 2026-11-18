@@ -1,0 +1,87 @@
+"""Offline tests for daily-loss validation. No Alpaca connection required."""
+
+import unittest
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from daily_loss_checks import evaluate_daily_loss
+
+NY = ZoneInfo("America/New_York")
+
+
+class DailyLossChecksTests(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime(2026, 11, 2, 15, 0, tzinfo=NY)
+        self.fresh_timestamp = int((self.now - timedelta(minutes=5)).timestamp())
+
+    def evaluate(self, pnl, timestamp=None):
+        if timestamp is None:
+            timestamp = self.fresh_timestamp
+        return evaluate_daily_loss([timestamp], [pnl], self.now)
+
+    def test_small_loss_is_allowed(self):
+        status, _, pnl, _ = self.evaluate(-199.99)
+        self.assertEqual(status, "ALLOWED")
+        self.assertEqual(pnl, -199.99)
+
+    def test_zero_pnl_is_allowed(self):
+        status, _, pnl, _ = self.evaluate(0.0)
+        self.assertEqual(status, "ALLOWED")
+        self.assertEqual(pnl, 0.0)
+
+    def test_exactly_200_loss_is_blocked(self):
+        status, _, pnl, _ = self.evaluate(-200.0)
+        self.assertEqual(status, "BLOCKED")
+        self.assertEqual(pnl, -200.0)
+
+    def test_loss_over_200_is_blocked(self):
+        status, _, pnl, _ = self.evaluate(-250.0)
+        self.assertEqual(status, "BLOCKED")
+        self.assertEqual(pnl, -250.0)
+
+    def test_empty_history_is_unknown_and_blocked(self):
+        result = evaluate_daily_loss([], [], self.now)
+        self.assertEqual(result[0], "UNKNOWN — BLOCKED")
+
+    def test_mismatched_history_is_unknown_and_blocked(self):
+        result = evaluate_daily_loss([self.fresh_timestamp], [], self.now)
+        self.assertEqual(result[0], "UNKNOWN — BLOCKED")
+
+    def test_stale_history_is_unknown_and_blocked(self):
+        stale = int((self.now - timedelta(minutes=31)).timestamp())
+        result = self.evaluate(0.0, stale)
+        self.assertEqual(result[0], "UNKNOWN — BLOCKED")
+        self.assertIn("stale", result[1])
+
+    def test_future_timestamp_is_unknown_and_blocked(self):
+        future = int((self.now + timedelta(minutes=1)).timestamp())
+        result = self.evaluate(0.0, future)
+        self.assertEqual(result[0], "UNKNOWN — BLOCKED")
+        self.assertIn("future", result[1])
+
+    def test_previous_day_history_is_unknown_and_blocked(self):
+        previous_day = int((self.now - timedelta(days=1)).timestamp())
+        result = self.evaluate(0.0, previous_day)
+        self.assertEqual(result[0], "UNKNOWN — BLOCKED")
+
+    def test_weekend_is_unknown_and_blocked(self):
+        sunday = datetime(2026, 11, 1, 15, 0, tzinfo=NY)
+        timestamp = int((sunday - timedelta(minutes=5)).timestamp())
+        result = evaluate_daily_loss([timestamp], [0.0], sunday)
+        self.assertEqual(result[0], "UNKNOWN — BLOCKED")
+        self.assertIn("weekend", result[1])
+
+    def test_non_finite_pnl_is_unknown_and_blocked(self):
+        result = self.evaluate(float("nan"))
+        self.assertEqual(result[0], "UNKNOWN — BLOCKED")
+
+    def test_naive_current_time_is_unknown_and_blocked(self):
+        naive_now = datetime(2026, 11, 2, 15, 0)
+        result = evaluate_daily_loss(
+            [self.fresh_timestamp], [0.0], naive_now
+        )
+        self.assertEqual(result[0], "UNKNOWN — BLOCKED")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

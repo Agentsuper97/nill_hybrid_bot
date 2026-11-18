@@ -1,0 +1,87 @@
+"""Offline validation of Alpaca daily portfolio P&L. No broker or order access."""
+
+import math
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+NY = ZoneInfo("America/New_York")
+DAILY_LOSS_LIMIT_DOLLARS = 200.00
+MAX_HISTORY_AGE_SECONDS = 30 * 60
+
+
+def evaluate_daily_loss(timestamps, pnl_values, now):
+    """Return (status, reason, daily_pnl, history_age_minutes).
+
+    Status is ALLOWED, BLOCKED, or UNKNOWN — BLOCKED.
+    All timestamps are Unix seconds; now must be timezone-aware.
+    """
+    try:
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("Current time must be timezone-aware.")
+
+        if not timestamps or not pnl_values or len(timestamps) != len(pnl_values):
+            raise ValueError("Portfolio history is empty or incomplete.")
+
+        timestamp = int(timestamps[-1])
+        daily_pnl = float(pnl_values[-1])
+
+        if not math.isfinite(daily_pnl):
+            raise ValueError("Latest daily P&L is not a finite number.")
+
+        latest_time_ny = datetime.fromtimestamp(timestamp, timezone.utc).astimezone(NY)
+        now_ny = now.astimezone(NY)
+
+        if now_ny.weekday() >= 5:
+            raise ValueError("Today is a weekend; there is no regular trading session.")
+
+        if (now_ny.hour, now_ny.minute) < (9, 30):
+            raise ValueError(
+                "It is before the regular market open (09:30 New York time); "
+                "today's regular-session P&L is not yet available for verification."
+            )
+
+        if latest_time_ny.date() != now_ny.date():
+            raise ValueError("No portfolio-history point is available for today's New York date.")
+
+        age_seconds = (now_ny - latest_time_ny).total_seconds()
+
+        if age_seconds < 0:
+            raise ValueError("Latest portfolio-history timestamp is in the future.")
+
+        after_close = now_ny.hour >= 16
+        exact_close_point = (
+            latest_time_ny.hour == 16
+            and latest_time_ny.minute == 0
+            and latest_time_ny.second == 0
+        )
+        within_after_close_window = (
+            after_close
+            and now_ny.hour < 20
+            and exact_close_point
+        )
+
+        if age_seconds > MAX_HISTORY_AGE_SECONDS and not within_after_close_window:
+            raise ValueError(
+                f"Latest portfolio-history point is stale "
+                f"({age_seconds / 60:.1f} minutes old; maximum 30 minutes)."
+            )
+
+        age_minutes = age_seconds / 60
+
+        if daily_pnl <= -DAILY_LOSS_LIMIT_DOLLARS:
+            return (
+                "BLOCKED",
+                "Account-wide daily loss has reached or exceeded the limit.",
+                daily_pnl,
+                age_minutes,
+            )
+
+        return (
+            "ALLOWED",
+            "Verified daily P&L is within the configured loss limit.",
+            daily_pnl,
+            age_minutes,
+        )
+
+    except Exception as exc:
+        return ("UNKNOWN — BLOCKED", str(exc), None, None)

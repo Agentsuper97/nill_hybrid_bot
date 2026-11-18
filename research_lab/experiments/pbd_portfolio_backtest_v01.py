@@ -1,0 +1,508 @@
+"""
+PBD PULLBACK PORTFOLIO BACKTEST v0.1
+
+Historical simulation only.
+No Alpaca connection. No orders.
+
+Uses the fixed PBD v0.1 detector.
+OOS period: 2026-10-01 through 2026-10-22.
+"""
+
+from pathlib import Path
+import sys
+import pandas as pd
+import numpy as np
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from research_lab.experiments.pbd_pullback_v01 import (
+    PBDConfig,
+    calculate_indicators,
+    detect_pbd_signal,
+)
+
+
+SYMBOLS = [
+    "NVDA", "AMD", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "AVGO",
+    "TSLA", "NFLX", "ORCL", "CRM", "MU", "QCOM", "PLTR", "SPY",
+    "QQQ", "IWM", "JPM", "LLY",
+]
+
+STARTING_EQUITY = 10_000.00
+RISK_PER_TRADE = 0.005
+MAX_OPEN_POSITIONS = 5
+MAX_POSITION_FRACTION = 0.20
+ROUND_TRIP_COST = 0.001
+
+OOS_START = pd.Timestamp("2026-10-01", tz="America/New_York")
+OOS_END = pd.Timestamp("2026-10-23", tz="America/New_York")
+
+BAR_MINUTES = 15
+NY = "America/New_York"
+
+
+def load_symbol(symbol, config):
+    path = ROOT / "intraday_snapshot" / f"{symbol}.csv"
+    if not path.exists():
+        return None
+
+    df = pd.read_csv(path, parse_dates=["Timestamp"])
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    df = df.set_index("timestamp").sort_index()
+
+    if df.index.tz is None:
+        df.index = df.index.tz_localize(NY)
+    else:
+        df.index = df.index.tz_convert(NY)
+
+    df = df.between_time("09:30", "16:00")
+    return calculate_indicators(df, config)
+
+
+def build_signals(data, config):
+    signals = []
+
+    for symbol, df in data.items():
+        for i in range(len(df)):
+            timestamp = df.index[i]
+
+            if timestamp < OOS_START or timestamp >= OOS_END:
+                continue
+
+            signal = detect_pbd_signal(df, i, config)
+
+            if signal is None:
+                continue
+
+            confirmation_index = signal["confirmation_index"]
+
+            if confirmation_index + 1 >= len(df):
+                continue
+
+            entry_time = df.index[confirmation_index + 1]
+
+            # No new entries after 15:30 ET.
+            # This prevents a new position from being carried overnight.
+            if entry_time.strftime("%H:%M") > "15:30":
+                continue
+
+            if entry_time >= OOS_END:
+                continue
+
+            signals.append({
+                "Symbol": symbol,
+                "SignalTime": df.index[i],
+                "ConfirmationTime": df.index[confirmation_index],
+                "EntryTime": entry_time,
+                "SignalIndex": i,
+                "EntryIndex": confirmation_index + 1,
+                **signal,
+            })
+
+    return sorted(signals, key=lambda x: x["EntryTime"])
+
+
+def run_backtest(data, signals, config):
+    cash = STARTING_EQUITY
+    positions = []
+    trades = []
+    equity_curve = []
+
+    signals_by_entry = {}
+
+    for signal in signals:
+        signals_by_entry.setdefault(signal["EntryTime"], []).append(signal)
+
+    all_times = sorted(
+        set(
+            timestamp
+            for df in data.values()
+            for timestamp in df.index
+            if OOS_START <= timestamp < OOS_END
+        )
+    )
+
+    for timestamp in all_times:
+        # --------------------------------------------------
+        # EXIT EXISTING POSITIONS
+        # --------------------------------------------------
+        remaining = []
+
+        for position in positions:
+            symbol = position["Symbol"]
+            df = data[symbol]
+
+            if timestamp not in df.index:
+                remaining.append(position)
+                continue
+
+            row = df.loc[timestamp]
+
+            stop = position["Stop"]
+            target = position["Target"]
+
+            exit_price = None
+            exit_reason = None
+
+            # Conservative assumption:
+            # if both stop and target occur in one candle,
+            # assume stop happens first.
+            if row["low"] <= stop:
+                if row["open"] < stop:
+                    exit_price = row["open"]
+                    exit_reason = "Stop (gap)"
+                else:
+                    exit_price = stop
+                    exit_reason = "Stop"
+
+            elif row["high"] >= target:
+                if row["open"] > target:
+                    exit_price = row["open"]
+                    exit_reason = "Target (gap)"
+                else:
+                    exit_price = target
+                    exit_reason = "Target"
+
+            else:
+                bars_held = position["BarsHeld"] + 1
+
+                if bars_held >= 16:
+                    exit_price = row["close"]
+                    exit_reason = "Time"
+
+                elif timestamp.strftime("%H:%M") >= "15:45":
+                    exit_price = row["close"]
+                    exit_reason = "End of day"
+
+            if exit_price is None:
+                position["BarsHeld"] += 1
+                remaining.append(position)
+                continue
+
+            gross_pnl = (
+                exit_price - position["EntryPrice"]
+            ) * position["Shares"]
+
+            exit_notional = exit_price * position["Shares"]
+
+            # Cost was charged on entry and here on exit.
+            exit_cost = exit_notional * ROUND_TRIP_COST / 2
+
+            net_pnl = (
+                gross_pnl
+                - position["EntryCost"]
+                - exit_cost
+            )
+
+            cash += exit_notional - exit_cost
+
+            trades.append({
+                "Symbol": symbol,
+                "SignalTime": position["SignalTime"],
+                "ConfirmationTime": position["ConfirmationTime"],
+                "EntryTime": position["EntryTime"],
+                "ExitTime": timestamp,
+                "EntryPrice": position["EntryPrice"],
+                "ExitPrice": exit_price,
+                "Shares": position["Shares"],
+                "Stop": stop,
+                "Target": target,
+                "EntryRVOL": position["EntryRVOL"],
+                "EntryPushATR": position["EntryPushATR"],
+                "PullbackFraction": position["PullbackFraction"],
+                "BarsHeld": position["BarsHeld"] + 1,
+                "ExitReason": exit_reason,
+                "GrossPnL": gross_pnl,
+                "EstimatedCosts": position["EntryCost"] + exit_cost,
+                "NetPnL": net_pnl,
+            })
+
+        positions = remaining
+
+        # --------------------------------------------------
+        # NEW ENTRIES
+        # --------------------------------------------------
+        for signal in signals_by_entry.get(timestamp, []):
+            if len(positions) >= MAX_OPEN_POSITIONS:
+                break
+
+            symbol = signal["Symbol"]
+
+            # Prevent duplicate symbol positions.
+            if any(p["Symbol"] == symbol for p in positions):
+                continue
+
+            df = data[symbol]
+
+            if timestamp not in df.index:
+                continue
+
+            row = df.loc[timestamp]
+
+            entry_price = float(row["open"])
+
+            if not np.isfinite(entry_price) or entry_price <= 0:
+                continue
+
+            stop_distance = float(signal["stop_distance"])
+
+            if not np.isfinite(stop_distance) or stop_distance <= 0:
+                continue
+
+            stop = entry_price - stop_distance
+
+            if stop <= 0:
+                continue
+
+            target = (
+                entry_price
+                + stop_distance * config.target_r_multiple
+            )
+
+            current_equity = cash + sum(
+                p["Shares"] * float(
+                    data[p["Symbol"]].loc[timestamp]["close"]
+                )
+                for p in positions
+            )
+
+            risk_budget = current_equity * RISK_PER_TRADE
+
+            shares_by_risk = int(
+                risk_budget / stop_distance
+            )
+
+            max_notional = (
+                current_equity * MAX_POSITION_FRACTION
+            )
+
+            shares_by_cap = int(
+                max_notional / entry_price
+            )
+
+            shares = min(shares_by_risk, shares_by_cap)
+
+            if shares < 1:
+                continue
+
+            entry_notional = entry_price * shares
+            entry_cost = entry_notional * ROUND_TRIP_COST / 2
+
+            if entry_notional + entry_cost > cash:
+                continue
+
+            cash -= entry_notional + entry_cost
+
+            positions.append({
+                "Symbol": symbol,
+                "SignalTime": signal["SignalTime"],
+                "ConfirmationTime": signal["ConfirmationTime"],
+                "EntryTime": timestamp,
+                "EntryPrice": entry_price,
+                "Shares": shares,
+                "Stop": stop,
+                "Target": target,
+                "EntryRVOL": signal["rvol"],
+                "EntryPushATR": signal["push_strength"],
+                "PullbackFraction": signal["pullback_fraction"],
+                "EntryCost": entry_cost,
+                "BarsHeld": 0,
+            })
+
+        # --------------------------------------------------
+        # EQUITY
+        # --------------------------------------------------
+        equity = cash
+
+        for position in positions:
+            symbol = position["Symbol"]
+            df = data[symbol]
+
+            if timestamp in df.index:
+                equity += (
+                    position["Shares"]
+                    * float(df.loc[timestamp]["close"])
+                )
+
+        equity_curve.append({
+            "Timestamp": timestamp,
+            "Equity": equity,
+        })
+
+    # ------------------------------------------------------
+    # FORCE REMAINING POSITIONS CLOSED AT FINAL AVAILABLE BAR
+    # ------------------------------------------------------
+    for position in positions:
+        symbol = position["Symbol"]
+        df = data[symbol]
+
+        available = df.loc[
+            (df.index >= position["EntryTime"])
+            & (df.index < OOS_END)
+        ]
+
+        if available.empty:
+            continue
+
+        timestamp = available.index[-1]
+        exit_price = float(available.iloc[-1]["close"])
+
+        gross_pnl = (
+            exit_price - position["EntryPrice"]
+        ) * position["Shares"]
+
+        exit_notional = exit_price * position["Shares"]
+        exit_cost = exit_notional * ROUND_TRIP_COST / 2
+
+        net_pnl = (
+            gross_pnl
+            - position["EntryCost"]
+            - exit_cost
+        )
+
+        trades.append({
+            "Symbol": symbol,
+            "SignalTime": position["SignalTime"],
+            "ConfirmationTime": position["ConfirmationTime"],
+            "EntryTime": position["EntryTime"],
+            "ExitTime": timestamp,
+            "EntryPrice": position["EntryPrice"],
+            "ExitPrice": exit_price,
+            "Shares": position["Shares"],
+            "Stop": position["Stop"],
+            "Target": position["Target"],
+            "EntryRVOL": position["EntryRVOL"],
+            "EntryPushATR": position["EntryPushATR"],
+            "PullbackFraction": position["PullbackFraction"],
+            "BarsHeld": position["BarsHeld"],
+            "ExitReason": "End of test",
+            "GrossPnL": gross_pnl,
+            "EstimatedCosts": position["EntryCost"] + exit_cost,
+            "NetPnL": net_pnl,
+        })
+
+    return pd.DataFrame(trades), pd.DataFrame(equity_curve)
+
+
+def print_results(trades, equity):
+    print()
+    print("=" * 65)
+    print("PBD PULLBACK PORTFOLIO BACKTEST v0.1")
+    print("=" * 65)
+    print("Historical simulation only.")
+    print("No Alpaca connection. No orders.")
+    print()
+
+    if trades.empty:
+        print("No completed trades.")
+        return
+
+    final_equity = (
+        STARTING_EQUITY
+        + trades["NetPnL"].sum()
+    )
+
+    net_pnl = final_equity - STARTING_EQUITY
+    net_return = net_pnl / STARTING_EQUITY
+
+    wins = trades.loc[trades["NetPnL"] > 0, "NetPnL"]
+    losses = trades.loc[trades["NetPnL"] < 0, "NetPnL"]
+
+    win_rate = len(wins) / len(trades)
+
+    profit_factor = (
+        wins.sum() / abs(losses.sum())
+        if len(losses)
+        else float("inf")
+    )
+
+    if not equity.empty:
+        running_max = equity["Equity"].cummax()
+        drawdown = (
+            equity["Equity"] / running_max - 1
+        )
+        max_drawdown = drawdown.min()
+    else:
+        max_drawdown = 0.0
+
+    print(f"OOS period: {OOS_START} to {OOS_END}")
+    print(f"Completed trades: {len(trades)}")
+    print(f"Starting equity: ${STARTING_EQUITY:,.2f}")
+    print(f"Final equity: ${final_equity:,.2f}")
+    print(f"Net P&L: ${net_pnl:,.2f}")
+    print(f"Net return: {net_return:.2%}")
+    print(f"Max recorded equity drawdown: {max_drawdown:.2%}")
+    print(f"Win rate: {win_rate:.1%}")
+    print(f"Profit factor: {profit_factor:.2f}")
+    print(
+        f"Estimated trading costs: "
+        f"${trades['EstimatedCosts'].sum():,.2f}"
+    )
+
+    print()
+    print("Exit reasons:")
+    print(
+        trades["ExitReason"]
+        .value_counts()
+        .to_string()
+    )
+
+    print()
+    print("Results by symbol:")
+
+    summary = (
+        trades.groupby("Symbol")
+        .agg(
+            Trades=("NetPnL", "size"),
+            Wins=("NetPnL", lambda x: (x > 0).sum()),
+            GrossPnL=("GrossPnL", "sum"),
+            EstimatedCosts=("EstimatedCosts", "sum"),
+            NetPnL=("NetPnL", "sum"),
+        )
+        .sort_values("NetPnL")
+    )
+
+    print(summary.to_string())
+
+    trades_path = ROOT / "research_lab" / "results" / "pbd_trades_v01.csv"
+    equity_path = ROOT / "research_lab" / "results" / "pbd_equity_v01.csv"
+
+    trades.to_csv(trades_path, index=False)
+    equity.to_csv(equity_path, index=False)
+
+    print()
+    print(f"Saved trades to: {trades_path}")
+    print(f"Saved equity curve to: {equity_path}")
+
+
+def main():
+    config = PBDConfig()
+
+    data = {}
+
+    for symbol in SYMBOLS:
+        df = load_symbol(symbol, config)
+        if df is not None:
+            data[symbol] = df
+
+    print("=" * 65)
+    print("PBD PULLBACK PORTFOLIO BACKTEST v0.1")
+    print("=" * 65)
+    print(f"Symbols with data: {len(data)} / {len(SYMBOLS)}")
+
+    signals = build_signals(data, config)
+
+    print(f"Detected PBD signals: {len(signals)}")
+
+    trades, equity = run_backtest(
+        data,
+        signals,
+        config,
+    )
+
+    print_results(trades, equity)
+
+
+if __name__ == "__main__":
+    main()
