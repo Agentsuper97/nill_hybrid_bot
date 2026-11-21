@@ -67,3 +67,42 @@ def test_missing_market_data_is_withheld():
     assert result.gate.decision == EvidenceDecision.BLOCK
     assert result.gate.approved_for_research is False
     assert result.bars == ()
+
+
+def test_historical_loader_excludes_future_bars():
+    from datetime import datetime, timezone
+
+    class HistoricalStore:
+        def load_bars_as_of(self, symbol, as_of):
+            assert symbol == "NVDA"
+            assert as_of == datetime(
+                2026, 11, 5, 22, 0, tzinfo=timezone.utc
+            )
+            return make_bars([100, 101, 102])
+
+        def load_bars(self, symbol):
+            raise AssertionError(
+                "Historical research must not use unrestricted loading"
+            )
+
+    result = load_approved_market_data(
+        "NVDA",
+        store=HistoricalStore(),
+        as_of=datetime(2026, 11, 5, 22, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.gate.decision == EvidenceDecision.ALLOW
+    assert len(result.bars) == 3
+
+
+def test_historical_loader_rejects_naive_datetime():
+    import pytest
+
+    store = FakeMarketStore(make_bars([100, 101]))
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        load_approved_market_data(
+            "NVDA",
+            store=store,
+            as_of=datetime(2026, 11, 5, 22, 0),
+        )
