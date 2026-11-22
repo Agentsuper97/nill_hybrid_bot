@@ -187,3 +187,58 @@ class MarketStore:
             ))
 
         return bars
+
+    def load_evidence_as_of(
+        self,
+        symbol: str,
+        as_of: datetime,
+        timeframe: str = "1d",
+    ):
+        """Return provenance for the latest eligible version of each candle."""
+        from app.evidence.provenance import MarketEvidence
+
+        symbol = symbol.strip().upper()
+
+        if not symbol:
+            raise ValueError("Symbol cannot be empty")
+
+        if as_of.tzinfo is None or as_of.utcoffset() is None:
+            raise ValueError("as_of must be timezone-aware")
+
+        cutoff = as_of.astimezone(timezone.utc).isoformat()
+
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute("""
+                SELECT *
+                FROM market_bars
+                WHERE symbol = ?
+                  AND timeframe = ?
+                  AND retrieved_at <= ?
+                  AND available_at <= ?
+                ORDER BY timestamp ASC, retrieved_at DESC, id DESC
+            """, (symbol, timeframe, cutoff, cutoff)).fetchall()
+
+        evidence = []
+        seen = set()
+
+        for row in rows:
+            timestamp = row["timestamp"]
+
+            if timestamp in seen:
+                continue
+
+            seen.add(timestamp)
+
+            evidence.append(MarketEvidence(
+                observation_id=row["id"],
+                symbol=row["symbol"],
+                timeframe=row["timeframe"],
+                timestamp=datetime.fromisoformat(row["timestamp"]),
+                available_at=datetime.fromisoformat(row["available_at"]),
+                retrieved_at=datetime.fromisoformat(row["retrieved_at"]),
+                source=row["source"],
+                adjusted=bool(row["adjusted"]),
+            ))
+
+        return evidence
