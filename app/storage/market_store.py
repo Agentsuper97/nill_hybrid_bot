@@ -48,8 +48,8 @@ class MarketStore:
             (
                 bar.symbol,
                 bar.timeframe.value,
-                bar.timestamp.isoformat(),
-                bar.available_at.isoformat(),
+                bar.timestamp.astimezone(timezone.utc).isoformat(),
+                bar.available_at.astimezone(timezone.utc).isoformat(),
                 bar.open,
                 bar.high,
                 bar.low,

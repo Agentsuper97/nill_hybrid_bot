@@ -174,3 +174,83 @@ def test_provenance_tracks_historical_revisions(tmp_path):
     assert late_evidence[0].observation_id == revised_id
 
     assert original_id != revised_id
+
+
+def test_market_store_normalizes_timestamps_to_utc(tmp_path):
+    import sqlite3
+
+    store = MarketStore(tmp_path / "utc_normalization.sqlite")
+
+    eastern = timezone(timedelta(hours=-5))
+
+    timestamp = datetime(2026, 11, 20, 10, tzinfo=eastern)
+    available_at = timestamp + timedelta(days=1)
+
+    bar = MarketBar(
+        symbol="NVDA",
+        timeframe="1d",
+        timestamp=timestamp,
+        available_at=available_at,
+        open=150.0,
+        high=155.0,
+        low=148.0,
+        close=152.0,
+        volume=1_000_000,
+        source="timezone_test",
+        adjusted=False,
+    )
+
+    assert store.save_bars([bar]) == 1
+
+    with sqlite3.connect(store.path) as connection:
+        stored = connection.execute(
+            "SELECT timestamp, available_at, retrieved_at FROM market_bars"
+        ).fetchone()
+
+    for value in stored:
+        parsed = datetime.fromisoformat(value)
+        assert parsed.utcoffset() == timedelta(0)
+
+    assert datetime.fromisoformat(stored[0]) == timestamp
+    assert datetime.fromisoformat(stored[1]) == available_at
+
+
+def test_equivalent_timezone_timestamps_share_one_candle(tmp_path):
+    store = MarketStore(tmp_path / "timezone_equivalence.sqlite")
+
+    utc = datetime(2026, 11, 20, 15, tzinfo=timezone.utc)
+    eastern = datetime(
+        2026, 11, 20, 10,
+        tzinfo=timezone(timedelta(hours=-5)),
+    )
+
+    assert utc == eastern
+
+    def make_bar(timestamp):
+        return MarketBar(
+            symbol="NVDA",
+            timeframe="1d",
+            timestamp=timestamp,
+            available_at=timestamp + timedelta(days=1),
+            open=150.0,
+            high=155.0,
+            low=148.0,
+            close=152.0,
+            volume=1_000_000,
+            source="timezone_equivalence_test",
+            adjusted=False,
+        )
+
+    inserted = store.save_bars([
+        make_bar(utc),
+        make_bar(eastern),
+    ])
+
+    assert inserted == 1
+    assert store.count_bars("NVDA") == 1
+
+    bars = store.load_bars("NVDA")
+
+    assert len(bars) == 1
+    assert bars[0].timestamp == utc
+    assert bars[0].timestamp.utcoffset() == timedelta(0)
