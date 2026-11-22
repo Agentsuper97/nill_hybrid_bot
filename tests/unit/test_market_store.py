@@ -254,3 +254,67 @@ def test_equivalent_timezone_timestamps_share_one_candle(tmp_path):
     assert len(bars) == 1
     assert bars[0].timestamp == utc
     assert bars[0].timestamp.utcoffset() == timedelta(0)
+
+
+def test_historical_observations_pair_prices_with_provenance(tmp_path):
+    store = MarketStore(tmp_path / "paired_observations.sqlite")
+
+    timestamp = datetime(2026, 11, 20, tzinfo=timezone.utc)
+
+    original = MarketBar(
+        symbol="NVDA",
+        timeframe="1d",
+        timestamp=timestamp,
+        available_at=timestamp + timedelta(days=1),
+        open=150.0,
+        high=155.0,
+        low=148.0,
+        close=152.0,
+        volume=1_000_000,
+        source="paired_test",
+        adjusted=False,
+    )
+
+    revised = original.model_copy(update={"close": 153.0})
+
+    assert store.save_bars([original]) == 1
+    assert store.save_bars([revised]) == 1
+
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE market_bars SET retrieved_at = ? WHERE id = 1",
+            ("2026-11-21T12:00:00+00:00",),
+        )
+        connection.execute(
+            "UPDATE market_bars SET retrieved_at = ? WHERE id = 2",
+            ("2026-11-22T12:00:00+00:00",),
+        )
+
+    early = store.load_observations_as_of(
+        "NVDA",
+        datetime(2026, 11, 21, 18, tzinfo=timezone.utc),
+    )
+
+    late = store.load_observations_as_of(
+        "NVDA",
+        datetime(2026, 11, 23, tzinfo=timezone.utc),
+    )
+
+    assert len(early) == len(late) == 1
+
+    early_bar, early_evidence = early[0]
+    late_bar, late_evidence = late[0]
+
+    assert early_bar.close == 152.0
+    assert late_bar.close == 153.0
+
+    assert early_evidence.observation_id == 1
+    assert late_evidence.observation_id == 2
+
+    for bar, evidence in (early[0], late[0]):
+        assert bar.symbol == evidence.symbol
+        assert bar.timeframe.value == evidence.timeframe
+        assert bar.timestamp == evidence.timestamp
+        assert bar.available_at == evidence.available_at
+        assert bar.source == evidence.source
+        assert bar.adjusted == evidence.adjusted

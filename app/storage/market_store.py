@@ -242,3 +242,73 @@ class MarketStore:
             ))
 
         return evidence
+
+    def load_observations_as_of(
+        self,
+        symbol: str,
+        as_of: datetime,
+        timeframe: str = "1d",
+    ):
+        """Return historical market bars paired with their exact provenance."""
+        from app.evidence.provenance import MarketEvidence
+
+        symbol = symbol.strip().upper()
+
+        if not symbol:
+            raise ValueError("Symbol cannot be empty")
+
+        if as_of.tzinfo is None or as_of.utcoffset() is None:
+            raise ValueError("as_of must be timezone-aware")
+
+        cutoff = as_of.astimezone(timezone.utc).isoformat()
+
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+
+            rows = connection.execute("""
+                SELECT *
+                FROM market_bars
+                WHERE symbol = ?
+                  AND timeframe = ?
+                  AND retrieved_at <= ?
+                  AND available_at <= ?
+                ORDER BY timestamp ASC, retrieved_at DESC, id DESC
+            """, (symbol, timeframe, cutoff, cutoff)).fetchall()
+
+        observations = []
+        seen = set()
+
+        for row in rows:
+            if row["timestamp"] in seen:
+                continue
+
+            seen.add(row["timestamp"])
+
+            bar = MarketBar(
+                symbol=row["symbol"],
+                timeframe=row["timeframe"],
+                timestamp=datetime.fromisoformat(row["timestamp"]),
+                available_at=datetime.fromisoformat(row["available_at"]),
+                open=row["open"],
+                high=row["high"],
+                low=row["low"],
+                close=row["close"],
+                volume=row["volume"],
+                source=row["source"],
+                adjusted=bool(row["adjusted"]),
+            )
+
+            evidence = MarketEvidence(
+                observation_id=row["id"],
+                symbol=row["symbol"],
+                timeframe=row["timeframe"],
+                timestamp=datetime.fromisoformat(row["timestamp"]),
+                available_at=datetime.fromisoformat(row["available_at"]),
+                retrieved_at=datetime.fromisoformat(row["retrieved_at"]),
+                source=row["source"],
+                adjusted=bool(row["adjusted"]),
+            )
+
+            observations.append((bar, evidence))
+
+        return observations
