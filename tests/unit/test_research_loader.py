@@ -73,12 +73,30 @@ def test_historical_loader_excludes_future_bars():
     from datetime import datetime, timezone
 
     class HistoricalStore:
-        def load_bars_as_of(self, symbol, as_of):
+        def load_observations_as_of(self, symbol, as_of):
+            from app.evidence.provenance import MarketEvidence
+
             assert symbol == "NVDA"
             assert as_of == datetime(
                 2026, 11, 5, 22, 0, tzinfo=timezone.utc
             )
-            return make_bars([100, 101, 102])
+
+            observations = []
+
+            for index, bar in enumerate(make_bars([100, 101, 102]), start=1):
+                evidence = MarketEvidence(
+                    observation_id=index,
+                    symbol=bar.symbol,
+                    timeframe=bar.timeframe.value,
+                    timestamp=bar.timestamp,
+                    available_at=bar.available_at,
+                    retrieved_at=bar.available_at,
+                    source=bar.source,
+                    adjusted=bar.adjusted,
+                )
+                observations.append((bar, evidence))
+
+            return observations
 
         def load_bars(self, symbol):
             raise AssertionError(
@@ -106,3 +124,56 @@ def test_historical_loader_rejects_naive_datetime():
             store=store,
             as_of=datetime(2026, 11, 5, 22, 0),
         )
+
+
+def test_historical_loader_releases_paired_evidence(tmp_path):
+    from app.storage.market_store import MarketStore
+
+    store = MarketStore(tmp_path / "approved_evidence.sqlite")
+    bars = make_bars([100, 101, 102])
+
+    assert store.save_bars(bars) == 3
+
+    cutoff = datetime.now(timezone.utc) + timedelta(minutes=1)
+
+    result = load_approved_market_data(
+        "NVDA",
+        store=store,
+        as_of=cutoff,
+    )
+
+    assert result.gate.decision == EvidenceDecision.ALLOW
+    assert len(result.bars) == 3
+    assert len(result.evidence) == 3
+
+    for bar, evidence in zip(result.bars, result.evidence):
+        assert evidence.observation_id > 0
+        assert evidence.symbol == bar.symbol
+        assert evidence.timestamp == bar.timestamp
+        assert evidence.available_at == bar.available_at
+        assert evidence.source == bar.source
+        assert evidence.retrieved_at <= cutoff
+
+
+def test_historical_loader_withholds_rejected_evidence(tmp_path):
+    from app.storage.market_store import MarketStore
+
+    store = MarketStore(tmp_path / "rejected_evidence.sqlite")
+
+    # The final candle falls sharply enough to trigger REVIEW.
+    bars = make_bars([100, 101, 85])
+
+    assert store.save_bars(bars) == 3
+
+    cutoff = datetime.now(timezone.utc) + timedelta(minutes=1)
+
+    result = load_approved_market_data(
+        "NVDA",
+        store=store,
+        as_of=cutoff,
+    )
+
+    assert result.gate.decision == EvidenceDecision.REVIEW
+    assert result.gate.approved_for_research is False
+    assert result.bars == ()
+    assert result.evidence == ()
