@@ -9,8 +9,29 @@ class FakeMarketStore:
     def __init__(self, bars):
         self.bars = bars
 
-    def load_bars(self, symbol):
-        return self.bars
+    def load_observations_as_of(self, symbol, as_of):
+        from app.evidence.provenance import MarketEvidence
+
+        observations = []
+
+        for index, bar in enumerate(self.bars, start=1):
+            if bar.available_at > as_of:
+                continue
+
+            evidence = MarketEvidence(
+                observation_id=index,
+                symbol=bar.symbol,
+                timeframe=bar.timeframe.value,
+                timestamp=bar.timestamp,
+                available_at=bar.available_at,
+                retrieved_at=bar.available_at,
+                source=bar.source,
+                adjusted=bar.adjusted,
+            )
+
+            observations.append((bar, evidence))
+
+        return observations
 
 
 def make_bars(closes):
@@ -177,3 +198,30 @@ def test_historical_loader_withholds_rejected_evidence(tmp_path):
     assert result.gate.approved_for_research is False
     assert result.bars == ()
     assert result.evidence == ()
+
+
+def test_current_loader_releases_paired_evidence(tmp_path):
+    from app.storage.market_store import MarketStore
+
+    store = MarketStore(tmp_path / "current_evidence.sqlite")
+    bars = make_bars([100, 101, 102])
+
+    assert store.save_bars(bars) == 3
+
+    result = load_approved_market_data(
+        "NVDA",
+        store=store,
+    )
+
+    assert result.gate.decision == EvidenceDecision.ALLOW
+    assert len(result.bars) == 3
+    assert len(result.evidence) == 3
+
+    for bar, evidence in zip(result.bars, result.evidence):
+        assert evidence.observation_id > 0
+        assert evidence.symbol == bar.symbol
+        assert evidence.timestamp == bar.timestamp
+        assert evidence.available_at == bar.available_at
+        assert evidence.source == bar.source
+        assert evidence.adjusted == bar.adjusted
+        assert evidence.retrieved_at <= datetime.now(timezone.utc)

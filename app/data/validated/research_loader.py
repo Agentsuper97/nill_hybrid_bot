@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.domain.market_data import MarketBar
 from app.evidence.provenance import MarketEvidence
@@ -27,17 +27,14 @@ def load_approved_market_data(
     """Load market data only when it passes the evidence gate."""
     store = store if store is not None else MarketStore()
 
-    evidence = ()
-
     if as_of is None:
-        bars = store.load_bars(symbol)
-    else:
-        if as_of.tzinfo is None or as_of.utcoffset() is None:
-            raise ValueError("as_of must be timezone-aware")
+        as_of = datetime.now(timezone.utc)
+    elif as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("as_of must be timezone-aware")
 
-        observations = store.load_observations_as_of(symbol, as_of)
-        bars = [bar for bar, _ in observations]
-        evidence = tuple(record for _, record in observations)
+    observations = store.load_observations_as_of(symbol, as_of)
+    bars = [bar for bar, _ in observations]
+    evidence = tuple(record for _, record in observations)
 
     report = check_market_bars(bars)
     gate = evaluate_market_data(report)
