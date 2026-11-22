@@ -89,3 +89,36 @@ def test_daily_timestamps_respect_new_york_daylight_saving(monkeypatch):
         bar.available_at == bar.timestamp + timedelta(days=1)
         for bar in bars
     )
+
+
+def test_current_daily_candle_has_future_availability(monkeypatch):
+    from datetime import datetime, timezone
+
+    data = pd.DataFrame(
+        {
+            "Open": [100.0],
+            "High": [103.0],
+            "Low": [99.0],
+            "Close": [102.0],
+            "Volume": [1_000_000],
+        },
+        index=pd.DatetimeIndex(["2026-11-20"]),
+    )
+
+    monkeypatch.setattr(
+        "app.ingestion.yahoo.yf.download",
+        lambda *args, **kwargs: data.copy(),
+    )
+
+    bars = fetch_daily_bars("NVDA")
+
+    simulated_decision_time = datetime(
+        2026, 11, 20, 15, 0, tzinfo=timezone.utc
+    )
+
+    assert len(bars) == 1
+
+    # The current implementation can ingest a daily candle
+    # before its estimated availability time.
+    assert bars[0].timestamp < simulated_decision_time
+    assert bars[0].available_at > simulated_decision_time
