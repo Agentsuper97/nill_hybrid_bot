@@ -38,6 +38,21 @@ class MarketStore:
                 )
             """)
 
+            # Preserve historical records when upgrading older databases.
+            columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(market_bars)"
+                )
+            }
+
+            if "availability_basis" not in columns:
+                connection.execute(
+                    "ALTER TABLE market_bars "
+                    "ADD COLUMN availability_basis TEXT NOT NULL "
+                    "DEFAULT 'unknown'"
+                )
+
     def save_bars(self, bars: list[MarketBar]) -> int:
         if not bars:
             return 0
@@ -58,6 +73,7 @@ class MarketStore:
                 bar.source,
                 int(bar.adjusted),
                 retrieved_at,
+                bar.availability_basis.value,
             )
             for bar in bars
         ]
@@ -67,8 +83,9 @@ class MarketStore:
                 INSERT OR IGNORE INTO market_bars (
                     symbol, timeframe, timestamp, available_at,
                     open, high, low, close, volume,
-                    source, adjusted, retrieved_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source, adjusted, retrieved_at,
+                    availability_basis
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, rows)
 
             return connection.total_changes
@@ -127,6 +144,7 @@ class MarketStore:
                 volume=row["volume"],
                 source=row["source"],
                 adjusted=bool(row["adjusted"]),
+                availability_basis=row["availability_basis"],
             ))
 
         return bars
@@ -184,6 +202,7 @@ class MarketStore:
                 volume=row["volume"],
                 source=row["source"],
                 adjusted=bool(row["adjusted"]),
+                availability_basis=row["availability_basis"],
             ))
 
         return bars
@@ -239,6 +258,7 @@ class MarketStore:
                 retrieved_at=datetime.fromisoformat(row["retrieved_at"]),
                 source=row["source"],
                 adjusted=bool(row["adjusted"]),
+                availability_basis=row["availability_basis"],
             ))
 
         return evidence
@@ -296,6 +316,7 @@ class MarketStore:
                 volume=row["volume"],
                 source=row["source"],
                 adjusted=bool(row["adjusted"]),
+                availability_basis=row["availability_basis"],
             )
 
             evidence = MarketEvidence(
@@ -307,6 +328,7 @@ class MarketStore:
                 retrieved_at=datetime.fromisoformat(row["retrieved_at"]),
                 source=row["source"],
                 adjusted=bool(row["adjusted"]),
+                availability_basis=row["availability_basis"],
             )
 
             observations.append((bar, evidence))

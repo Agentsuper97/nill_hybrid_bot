@@ -55,3 +55,29 @@ def test_availability_before_observation_rejected():
             timestamp=now,
             available_at=now - timedelta(hours=1),
         )
+
+
+def test_legacy_provenance_defaults_to_unknown_availability():
+    evidence = make_evidence()
+
+    assert evidence.availability_basis.value == "unknown"
+
+
+@pytest.mark.parametrize(
+    "basis",
+    [
+        "unknown",
+        "estimated_policy",
+        "provider_reported",
+        "independently_verified",
+    ],
+)
+def test_provenance_accepts_availability_classifications(basis):
+    evidence = make_evidence(availability_basis=basis)
+
+    assert evidence.availability_basis.value == basis
+
+
+def test_provenance_rejects_invalid_availability_classification():
+    with pytest.raises(ValueError, match="availability_basis"):
+        make_evidence(availability_basis="guaranteed")

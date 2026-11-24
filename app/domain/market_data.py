@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from app.evidence.provenance import AvailabilityBasis
 
 
 class Timeframe(str, Enum):
@@ -32,6 +33,7 @@ class MarketBar(BaseModel):
 
     source: str = Field(min_length=1)
     adjusted: bool = False
+    availability_basis: AvailabilityBasis = AvailabilityBasis.UNKNOWN
 
     @model_validator(mode="after")
     def validate_bar(self):

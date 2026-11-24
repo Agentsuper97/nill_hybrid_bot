@@ -37,6 +37,10 @@ def test_daily_bar_uses_documented_availability_placeholder(monkeypatch):
     assert bar.timeframe.value == "1d"
     assert bar.source == "yfinance"
 
+    # Yahoo's availability timestamp is calculated using our
+    # internal policy, not reported or independently verified.
+    assert bar.availability_basis.value == "estimated_policy"
+
     # Current policy: NY-local candle date plus 24 hours.
     # This is an estimate, not verified provider availability.
     assert bar.available_at == bar.timestamp + timedelta(days=1)

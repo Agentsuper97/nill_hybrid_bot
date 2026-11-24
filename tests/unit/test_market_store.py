@@ -318,3 +318,124 @@ def test_historical_observations_pair_prices_with_provenance(tmp_path):
         assert bar.available_at == evidence.available_at
         assert bar.source == evidence.source
         assert bar.adjusted == evidence.adjusted
+
+
+def test_legacy_database_migrates_availability_basis_without_promoting_evidence(tmp_path):
+    import sqlite3
+
+    database = tmp_path / "legacy_availability.sqlite"
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("""
+            CREATE TABLE market_bars (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                available_at TEXT NOT NULL,
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume REAL NOT NULL,
+                source TEXT NOT NULL,
+                adjusted INTEGER NOT NULL,
+                retrieved_at TEXT NOT NULL,
+                UNIQUE (symbol, timeframe, timestamp, source, adjusted, retrieved_at)
+            )
+        """)
+        connection.execute("""
+            INSERT INTO market_bars (
+                symbol, timeframe, timestamp, available_at,
+                open, high, low, close, volume, source,
+                adjusted, retrieved_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "NVDA", "1d",
+            "2026-11-20T00:00:00+00:00",
+            "2026-11-21T00:00:00+00:00",
+            150.0, 155.0, 148.0, 152.0,
+            1_000_000, "legacy_test", 0,
+            "2026-11-21T12:00:00+00:00",
+        ))
+
+    store = MarketStore(database)
+
+    with sqlite3.connect(database) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(market_bars)")
+        }
+        stored = connection.execute(
+            "SELECT id, close, availability_basis FROM market_bars"
+        ).fetchone()
+
+    assert "availability_basis" in columns
+    assert stored == (1, 152.0, "unknown")
+    assert store.count_bars("NVDA") == 1
+
+    cutoff = datetime(2026, 11, 22, tzinfo=timezone.utc)
+    observations = store.load_observations_as_of("NVDA", cutoff)
+
+    assert len(observations) == 1
+
+    bar, evidence = observations[0]
+
+    assert bar.close == 152.0
+    assert bar.availability_basis.value == "unknown"
+    assert evidence.observation_id == 1
+    assert evidence.availability_basis.value == "unknown"
+
+
+@pytest.mark.parametrize(
+    "basis",
+    [
+        "unknown",
+        "estimated_policy",
+        "provider_reported",
+        "independently_verified",
+    ],
+)
+def test_availability_basis_survives_storage_round_trip(tmp_path, basis):
+    store = MarketStore(tmp_path / "availability_round_trip.sqlite")
+
+    timestamp = datetime(2026, 11, 20, tzinfo=timezone.utc)
+
+    bar = MarketBar(
+        symbol="NVDA",
+        timeframe="1d",
+        timestamp=timestamp,
+        available_at=timestamp + timedelta(days=1),
+        open=150.0,
+        high=155.0,
+        low=148.0,
+        close=152.0,
+        volume=1_000_000,
+        source="classification_test",
+        adjusted=False,
+        availability_basis=basis,
+    )
+
+    assert store.save_bars([bar]) == 1
+
+    cutoff = datetime.now(timezone.utc) + timedelta(minutes=1)
+
+    latest = store.load_bars("NVDA")
+    historical = store.load_bars_as_of("NVDA", cutoff)
+    evidence = store.load_evidence_as_of("NVDA", cutoff)
+    observations = store.load_observations_as_of("NVDA", cutoff)
+
+    assert len(latest) == 1
+    assert len(historical) == 1
+    assert len(evidence) == 1
+    assert len(observations) == 1
+
+    assert latest[0].availability_basis.value == basis
+    assert historical[0].availability_basis.value == basis
+    assert evidence[0].availability_basis.value == basis
+
+    paired_bar, paired_evidence = observations[0]
+
+    assert paired_bar.availability_basis.value == basis
+    assert paired_evidence.availability_basis.value == basis
+    assert paired_bar.availability_basis == paired_evidence.availability_basis

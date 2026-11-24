@@ -56,6 +56,7 @@ def fetch_daily_bars(symbol: str, period: str = "1mo") -> list[MarketBar]:
             volume=float(row["Volume"]),
             source="yfinance",
             adjusted=False,
+            availability_basis="estimated_policy",
         )
 
         bars.append(bar)
