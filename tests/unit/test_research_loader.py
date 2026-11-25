@@ -27,6 +27,7 @@ class FakeMarketStore:
                 retrieved_at=bar.available_at,
                 source=bar.source,
                 adjusted=bar.adjusted,
+                availability_basis=bar.availability_basis,
             )
 
             observations.append((bar, evidence))
@@ -34,7 +35,7 @@ class FakeMarketStore:
         return observations
 
 
-def make_bars(closes):
+def make_bars(closes, availability_basis="estimated_policy"):
     start = datetime(2026, 11, 2, 21, 0, tzinfo=timezone.utc)
     bars = []
 
@@ -54,6 +55,7 @@ def make_bars(closes):
                 volume=1000000,
                 source="test",
                 adjusted=False,
+                availability_basis=availability_basis,
             )
         )
 
@@ -114,6 +116,7 @@ def test_historical_loader_excludes_future_bars():
                     retrieved_at=bar.available_at,
                     source=bar.source,
                     adjusted=bar.adjusted,
+                    availability_basis=bar.availability_basis,
                 )
                 observations.append((bar, evidence))
 

@@ -5,7 +5,13 @@ from app.domain.market_data import MarketBar
 from app.evidence.provenance import MarketEvidence
 from app.storage.market_store import MarketStore
 from app.data.validated.quality import check_market_bars
+from app.evidence.availability_gate import (
+    AvailabilityGateResult,
+    ResearchPolicy,
+    evaluate_availability,
+)
 from app.evidence.quality_gate import (
+    EvidenceDecision,
     EvidenceGateResult,
     evaluate_market_data,
 )
@@ -17,14 +23,18 @@ class ResearchLoadResult:
     bars: tuple[MarketBar, ...]
     gate: EvidenceGateResult
     evidence: tuple[MarketEvidence, ...] = ()
+    availability_gate: AvailabilityGateResult | None = None
 
 
 def load_approved_market_data(
     symbol: str,
     store: MarketStore | None = None,
     as_of: datetime | None = None,
+    *,
+    policy: ResearchPolicy = ResearchPolicy.EXPLORATORY,
 ) -> ResearchLoadResult:
-    """Load market data only when it passes the evidence gate."""
+    """Release data only when quality and availability gates approve."""
+    policy = ResearchPolicy(policy)
     store = store if store is not None else MarketStore()
 
     if as_of is None:
@@ -39,12 +49,35 @@ def load_approved_market_data(
     report = check_market_bars(bars)
     gate = evaluate_market_data(report)
 
+    availability_gate = evaluate_availability(
+        tuple(record.availability_basis for record in evidence),
+        policy=policy,
+    )
+
+    if any(
+        bar.availability_basis != record.availability_basis
+        for bar, record in observations
+    ):
+        availability_gate = AvailabilityGateResult(
+            policy=policy,
+            approved_for_research=False,
+            reason="Bar and evidence availability classifications disagree.",
+        )
+
+    if gate.approved_for_research and not availability_gate.approved_for_research:
+        gate = EvidenceGateResult(
+            decision=EvidenceDecision.BLOCK,
+            reason=availability_gate.reason,
+            approved_for_research=False,
+        )
+
     if not gate.approved_for_research:
         return ResearchLoadResult(
             symbol=symbol.upper(),
             bars=(),
             gate=gate,
             evidence=(),
+            availability_gate=availability_gate,
         )
 
     return ResearchLoadResult(
@@ -52,4 +85,5 @@ def load_approved_market_data(
         bars=tuple(bars),
         gate=gate,
         evidence=evidence,
+        availability_gate=availability_gate,
     )

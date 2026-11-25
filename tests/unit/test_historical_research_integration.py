@@ -26,6 +26,7 @@ def test_historical_research_integrity(tmp_path):
             volume=1_000_000,
             source="integration_test",
             adjusted=False,
+            availability_basis="estimated_policy",
         )
 
     original = make_bar(2, 100, 3)
