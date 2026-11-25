@@ -26,6 +26,45 @@ class ResearchLoadResult:
     availability_gate: AvailabilityGateResult | None = None
 
 
+def _provenance_error(
+    symbol: str,
+    observations: list[tuple[MarketBar, MarketEvidence]],
+    as_of: datetime,
+) -> str | None:
+    """Validate observation identity and point-in-time consistency."""
+    seen_ids: set[int] = set()
+
+    for bar, record in observations:
+        if bar.symbol.upper() != symbol.upper():
+            return "Market observation does not match requested symbol."
+
+        fields = (
+            ("symbol", bar.symbol, record.symbol),
+            ("timeframe", bar.timeframe.value, record.timeframe),
+            ("timestamp", bar.timestamp, record.timestamp),
+            ("available_at", bar.available_at, record.available_at),
+            ("source", bar.source, record.source),
+            ("adjusted", bar.adjusted, record.adjusted),
+        )
+
+        for field, bar_value, evidence_value in fields:
+            if bar_value != evidence_value:
+                return f"Bar and evidence disagree on {field}."
+
+        if record.observation_id in seen_ids:
+            return "Duplicate evidence observation identity."
+
+        seen_ids.add(record.observation_id)
+
+        if bar.available_at > as_of or record.available_at > as_of:
+            return "Observation availability exceeds research cutoff."
+
+        if record.retrieved_at > as_of:
+            return "Evidence retrieval exceeds research cutoff."
+
+    return None
+
+
 def load_approved_market_data(
     symbol: str,
     store: MarketStore | None = None,
@@ -62,6 +101,17 @@ def load_approved_market_data(
             policy=policy,
             approved_for_research=False,
             reason="Bar and evidence availability classifications disagree.",
+        )
+
+    provenance_error = _provenance_error(
+        symbol, observations, as_of
+    )
+
+    if provenance_error is not None:
+        gate = EvidenceGateResult(
+            decision=EvidenceDecision.BLOCK,
+            reason=provenance_error,
+            approved_for_research=False,
         )
 
     if gate.approved_for_research and not availability_gate.approved_for_research:
