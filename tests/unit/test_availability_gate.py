@@ -17,7 +17,7 @@ from app.evidence.availability_gate import (
         (ResearchPolicy.STRICT, AvailabilityBasis.UNKNOWN, False),
         (ResearchPolicy.STRICT, AvailabilityBasis.ESTIMATED_POLICY, False),
         (ResearchPolicy.STRICT, AvailabilityBasis.PROVIDER_REPORTED, False),
-        (ResearchPolicy.STRICT, AvailabilityBasis.INDEPENDENTLY_VERIFIED, True),
+        (ResearchPolicy.STRICT, AvailabilityBasis.INDEPENDENTLY_VERIFIED, False),
     ],
 )
 def test_availability_policy_decisions(policy, basis, approved):
@@ -59,13 +59,14 @@ def test_strict_research_withholds_mixed_estimated_evidence():
     assert result.approved_for_research is False
 
 
-def test_strict_research_accepts_multiple_verified_observations():
+def test_strict_research_rejects_multiple_unproven_verification_claims():
     result = evaluate_availability(
         (AvailabilityBasis.INDEPENDENTLY_VERIFIED,) * 3,
         policy=ResearchPolicy.STRICT,
     )
 
-    assert result.approved_for_research is True
+    assert result.approved_for_research is False
+    assert "authentication" in result.reason.lower()
 
 
 def test_estimated_evidence_reports_limitations():

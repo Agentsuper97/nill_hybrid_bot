@@ -50,7 +50,7 @@ def make_store(tmp_path, bases, closes=None):
         (ResearchPolicy.STRICT, AvailabilityBasis.UNKNOWN, False),
         (ResearchPolicy.STRICT, AvailabilityBasis.ESTIMATED_POLICY, False),
         (ResearchPolicy.STRICT, AvailabilityBasis.PROVIDER_REPORTED, False),
-        (ResearchPolicy.STRICT, AvailabilityBasis.INDEPENDENTLY_VERIFIED, True),
+        (ResearchPolicy.STRICT, AvailabilityBasis.INDEPENDENTLY_VERIFIED, False),
     ],
 )
 def test_loader_enforces_availability_policy(
@@ -120,7 +120,7 @@ def test_strict_loader_withholds_mixed_evidence(tmp_path):
     assert result.evidence == ()
 
 
-def test_verified_availability_cannot_override_quality_gate(tmp_path):
+def test_approved_availability_cannot_override_quality_gate(tmp_path):
     store = make_store(
         tmp_path,
         [AvailabilityBasis.INDEPENDENTLY_VERIFIED] * 3,
@@ -130,9 +130,10 @@ def test_verified_availability_cannot_override_quality_gate(tmp_path):
     result = load_approved_market_data(
         "NVDA",
         store=store,
-        policy=ResearchPolicy.STRICT,
+        policy=ResearchPolicy.EXPLORATORY,
     )
 
+    assert result.availability_gate.approved_for_research is True
     assert result.gate.approved_for_research is False
     assert result.bars == ()
     assert result.evidence == ()

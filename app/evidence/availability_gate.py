@@ -65,11 +65,20 @@ def evaluate_availability(
 
         return AvailabilityGateResult(
             policy=policy,
-            approved_for_research=True,
-            reason="All observations have independently verified availability classifications.",
+            approved_for_research=False,
+            reason=(
+                "Strict research requires independent authentication. "
+                "Verification classifications alone are insufficient."
+            ),
         )
 
     limitations = []
+
+    if AvailabilityBasis.INDEPENDENTLY_VERIFIED in bases:
+        limitations.append(
+            "Independent verification is claimed, but supporting "
+            "authentication proof has not been established."
+        )
 
     if AvailabilityBasis.ESTIMATED_POLICY in bases:
         limitations.append(
