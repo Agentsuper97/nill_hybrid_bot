@@ -3,6 +3,10 @@ from datetime import datetime, timezone
 
 from app.domain.market_data import MarketBar
 from app.evidence.provenance import MarketEvidence
+from app.evidence.manifest import (
+    ResearchEvidenceManifest,
+    build_research_manifest,
+)
 from app.storage.market_store import MarketStore
 from app.data.validated.quality import check_market_bars
 from app.evidence.availability_gate import (
@@ -24,6 +28,7 @@ class ResearchLoadResult:
     gate: EvidenceGateResult
     evidence: tuple[MarketEvidence, ...] = ()
     availability_gate: AvailabilityGateResult | None = None
+    manifest: ResearchEvidenceManifest | None = None
 
 
 def _provenance_error(
@@ -86,7 +91,8 @@ def load_approved_market_data(
     evidence = tuple(record for _, record in observations)
 
     report = check_market_bars(bars)
-    gate = evaluate_market_data(report)
+    quality_gate = evaluate_market_data(report)
+    gate = quality_gate
 
     availability_gate = evaluate_availability(
         tuple(record.availability_basis for record in evidence),
@@ -121,6 +127,16 @@ def load_approved_market_data(
             approved_for_research=False,
         )
 
+    manifest = build_research_manifest(
+        symbol=symbol,
+        as_of=as_of,
+        observations=observations,
+        quality_gate=quality_gate,
+        availability_gate=availability_gate,
+        provenance_error=provenance_error,
+        final_gate=gate,
+    )
+
     if not gate.approved_for_research:
         return ResearchLoadResult(
             symbol=symbol.upper(),
@@ -128,6 +144,7 @@ def load_approved_market_data(
             gate=gate,
             evidence=(),
             availability_gate=availability_gate,
+            manifest=manifest,
         )
 
     return ResearchLoadResult(
@@ -136,4 +153,5 @@ def load_approved_market_data(
         gate=gate,
         evidence=evidence,
         availability_gate=availability_gate,
+        manifest=manifest,
     )
